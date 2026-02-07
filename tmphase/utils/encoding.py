@@ -1,8 +1,10 @@
 """Encoding utilities for converting symbolic inputs to numeric vectors.
 
-Two encoding strategies:
+Three encoding strategies:
 1. Hash-based (original): deterministic but semantically blind
-2. N-gram based (new): similar words produce similar vectors
+2. N-gram based: similar words produce similar vectors
+3. Bag-of-words hashed (BOW): each word activates specific dimensions,
+   making minimal word differences maximally discriminative
 """
 
 from __future__ import annotations
@@ -22,12 +24,10 @@ def encode_symbol(symbol: str, dim: int = 32) -> np.ndarray:
     produces the same vector. Values are in [-1, 1].
     """
     h = hashlib.sha256(symbol.encode("utf-8")).digest()
-    # Use enough bytes to fill the requested dimension
     while len(h) < dim:
         h += hashlib.sha256(h).digest()
-    # Convert bytes to uint8 then scale to [-1, 1] (no NaN/Inf possible)
     raw = np.frombuffer(h[:dim], dtype=np.uint8).astype(np.float32)
-    raw = (raw / 127.5) - 1.0  # Maps [0, 255] -> [-1.0, ~1.0]
+    raw = (raw / 127.5) - 1.0
     return raw[:dim]
 
 
@@ -49,21 +49,13 @@ def _ngram_to_vec(ngram: str, dim: int) -> np.ndarray:
 
 
 def encode_word_ngram(word: str, dim: int = 32) -> np.ndarray:
-    """Encode a word using character n-gram averaging.
-
-    Key property: similar words (e.g. "hot" / "not", "wet" / "set")
-    share some n-grams and thus produce partially similar vectors,
-    while very different words produce orthogonal vectors.
-    """
+    """Encode a word using character n-gram averaging."""
     word = word.lower().strip()
     if not word:
         return np.zeros(dim, dtype=np.float32)
-
-    # Use 2-grams and 3-grams for a richer representation
     ngrams = _char_ngrams(word, 2) + _char_ngrams(word, 3)
     if not ngrams:
         return encode_symbol(word, dim)
-
     vecs = [_ngram_to_vec(ng, dim) for ng in ngrams]
     combined = np.mean(vecs, axis=0)
     norm = np.linalg.norm(combined)
@@ -73,30 +65,97 @@ def encode_word_ngram(word: str, dim: int = 32) -> np.ndarray:
 
 
 def encode_statement_ngram(statement: str, dim: int = 32) -> np.ndarray:
-    """Encode a statement using n-gram word embeddings.
+    """Encode a statement using n-gram word embeddings with position weighting."""
+    words = statement.lower().split()
+    if not words:
+        return np.zeros(dim, dtype=np.float32)
+    vectors = []
+    weights = []
+    for i, word in enumerate(words):
+        vectors.append(encode_word_ngram(word, dim))
+        weights.append(1.0 / (1.0 + 0.1 * i))
+    weights = np.array(weights, dtype=np.float32)
+    weights /= weights.sum()
+    combined = np.zeros(dim, dtype=np.float32)
+    for v, w in zip(vectors, weights):
+        combined += w * v
+    norm = np.linalg.norm(combined)
+    if norm > 1e-8:
+        combined = combined / norm
+    return combined.astype(np.float32)
 
-    Words are encoded individually with n-grams, then combined using
-    position-weighted averaging (earlier words weighted slightly more,
-    giving rudimentary word-order sensitivity).
+
+# ── Bag-of-words hashed encoding ───────────────────────────────────
+
+def _word_hash_index(word: str, dim: int) -> int:
+    """Map a word to a specific dimension index via hashing."""
+    h = int(hashlib.md5(word.encode("utf-8")).hexdigest(), 16)
+    return h % dim
+
+
+def _word_hash_sign(word: str) -> float:
+    """Map a word to +1 or -1 (random sign hashing for variance reduction)."""
+    h = int(hashlib.sha1(word.encode("utf-8")).hexdigest(), 16)
+    return 1.0 if (h % 2 == 0) else -1.0
+
+
+def _bigram_hash_index(bigram: str, dim: int) -> int:
+    """Map a word bigram to a dimension index."""
+    h = int(hashlib.sha256(bigram.encode("utf-8")).hexdigest(), 16)
+    return h % dim
+
+
+def encode_statement_bow(statement: str, dim: int = 32) -> np.ndarray:
+    """Encode using hashed bag-of-words + bigrams.
+
+    Each word and word-bigram activates specific dimensions.
+    Key advantage: "water boils at hundred degrees" vs
+    "water boils at fifty degrees" differ in exactly the dimensions
+    where "hundred" and "fifty" hash to. This makes small word
+    differences maximally visible to the network.
     """
     words = statement.lower().split()
     if not words:
         return np.zeros(dim, dtype=np.float32)
 
-    vectors = []
-    weights = []
-    for i, word in enumerate(words):
-        vectors.append(encode_word_ngram(word, dim))
-        # Position weight: mild decay so word order matters slightly
-        weights.append(1.0 / (1.0 + 0.1 * i))
+    vec = np.zeros(dim, dtype=np.float32)
 
-    weights = np.array(weights, dtype=np.float32)
-    weights /= weights.sum()
+    # Unigrams: each word activates a dimension with +/- sign
+    for word in words:
+        idx = _word_hash_index(word, dim)
+        sign = _word_hash_sign(word)
+        vec[idx] += sign
 
-    combined = np.zeros(dim, dtype=np.float32)
-    for v, w in zip(vectors, weights):
-        combined += w * v
+    # Bigrams: capture word order / adjacency
+    for i in range(len(words) - 1):
+        bigram = f"{words[i]}_{words[i + 1]}"
+        idx = _bigram_hash_index(bigram, dim)
+        vec[idx] += _word_hash_sign(bigram) * 0.5
 
+    # Normalize to unit length
+    norm = np.linalg.norm(vec)
+    if norm > 1e-8:
+        vec = vec / norm
+    return vec.astype(np.float32)
+
+
+# ── Combined encoding ──────────────────────────────────────────────
+
+def encode_statement_combined(statement: str, dim: int = 32) -> np.ndarray:
+    """Combine BOW (discriminative) + n-gram (semantic) encodings.
+
+    First half: hashed bag-of-words (captures which exact words are present)
+    Second half: n-gram encoding (captures word similarity / morphology)
+
+    This gives the network both:
+    - Exact word identity signals (BOW)
+    - Fuzzy word similarity signals (n-gram)
+    """
+    half = dim // 2
+    rest = dim - half
+    bow = encode_statement_bow(statement, half)
+    ngram = encode_statement_ngram(statement, rest)
+    combined = np.concatenate([bow, ngram])
     norm = np.linalg.norm(combined)
     if norm > 1e-8:
         combined = combined / norm
@@ -105,11 +164,11 @@ def encode_statement_ngram(statement: str, dim: int = 32) -> np.ndarray:
 
 # ── Unified interface ──────────────────────────────────────────────
 
-def encode_statement(statement: str, dim: int = 32, method: str = "ngram") -> np.ndarray:
+def encode_statement(statement: str, dim: int = 32, method: str = "combined") -> np.ndarray:
     """Encode a statement into a fixed-dimension vector.
 
     Args:
-        method: "hash" for original hash-based, "ngram" for semantic n-gram
+        method: "hash", "ngram", "bow", or "combined" (default)
     """
     if method == "hash":
         words = statement.lower().split()
@@ -121,10 +180,14 @@ def encode_statement(statement: str, dim: int = 32, method: str = "ngram") -> np
         if norm > 1e-8:
             combined = combined / norm
         return combined.astype(np.float32)
-    else:
+    elif method == "ngram":
         return encode_statement_ngram(statement, dim)
+    elif method == "bow":
+        return encode_statement_bow(statement, dim)
+    else:  # "combined"
+        return encode_statement_combined(statement, dim)
 
 
-def encode_batch(statements: Sequence[str], dim: int = 32, method: str = "ngram") -> np.ndarray:
+def encode_batch(statements: Sequence[str], dim: int = 32, method: str = "combined") -> np.ndarray:
     """Encode a batch of statements. Returns shape (N, dim)."""
     return np.array([encode_statement(s, dim, method) for s in statements], dtype=np.float32)

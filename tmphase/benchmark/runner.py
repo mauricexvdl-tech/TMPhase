@@ -73,7 +73,7 @@ def run_benchmark(config: BenchmarkConfig | None = None) -> None:
 
     print("=" * 72)
     print("TMPhase Benchmark Suite v2")
-    print(f"Encoding: n-gram (semantic) | Regularization: ON")
+    print(f"Encoding: combined (BOW+n-gram) | Adversarial fitness: v3")
     print(f"Config: pop={config.population_size}, gen={config.generations}, "
           f"seeds={config.n_seeds}, train_ratio={config.train_ratio}")
     print("=" * 72)

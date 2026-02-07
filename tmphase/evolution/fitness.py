@@ -107,6 +107,15 @@ class OracleDataset:
         return ds
 
 
+def _cosine_similarity(a: np.ndarray, b: np.ndarray) -> float:
+    """Cosine similarity between two vectors, returns 0 if either is zero."""
+    norm_a = np.linalg.norm(a)
+    norm_b = np.linalg.norm(b)
+    if norm_a < 1e-8 or norm_b < 1e-8:
+        return 0.0
+    return float(np.dot(a, b) / (norm_a * norm_b))
+
+
 def fitness_embedder_excitatory(
     genome: Genome,
     embedder_i_genome: Genome,
@@ -121,7 +130,8 @@ def fitness_embedder_excitatory(
 
     Rewarded when:
     - True statements produce strong residual signals (survive cancellation)
-    - Its signal is stronger than Embedder_I for true statements
+    - E and I vectors are aligned for true statements (constructive interference)
+    - E and I vectors are anti-aligned for false statements (destructive interference)
     """
     net_e = FeedForwardNetwork(genome)
     net_i = FeedForwardNetwork(embedder_i_genome)
@@ -144,15 +154,16 @@ def fitness_embedder_excitatory(
 
         truth_score = net_boundary.activate(residual)[0]
         signal_strength = np.linalg.norm(residual)
+        cos_ei = _cosine_similarity(pos_e, pos_i)
 
         if item.is_true:
-            # True: want high truth_score AND strong signal
-            score += truth_score * (1.0 + signal_strength)
+            # True: want high truth_score, strong signal, E aligned with I
+            alignment_bonus = max(0.0, cos_ei)  # reward alignment
+            score += truth_score * (1.0 + signal_strength) + alignment_bonus * 0.5
         else:
-            # False: excitatory embedder is NOT penalized for false items
-            # (that's the inhibitory embedder's job)
-            # But mild bonus if false items happen to score low
-            score += (1.0 - truth_score) * 0.3
+            # False: reward if E cooperates with I to cancel
+            anti_alignment_bonus = max(0.0, -cos_ei)  # reward anti-alignment
+            score += (1.0 - truth_score) * 0.5 + anti_alignment_bonus * 0.3
 
     raw = score / len(oracle)
     return max(0.001, raw - _complexity_penalty(genome, complexity_weight))
@@ -171,8 +182,9 @@ def fitness_embedder_inhibitory(
     """Fitness function for the Inhibitory Embedder.
 
     Rewarded when:
-    - False statements are cancelled (weak residual, low truth score)
-    - Its signal is stronger than Embedder_E for false statements
+    - False statements: I produces vectors anti-aligned with E (destructive interference)
+    - True statements: I produces vectors aligned with E (constructive, lets truth through)
+    - This creates the core phase cancellation dynamic.
     """
     net_e = FeedForwardNetwork(embedder_e_genome)
     net_i = FeedForwardNetwork(genome)
@@ -194,15 +206,17 @@ def fitness_embedder_inhibitory(
 
         truth_score = net_boundary.activate(residual)[0]
         signal_strength = np.linalg.norm(residual)
+        cos_ei = _cosine_similarity(pos_e, pos_i)
 
         if not item.is_true:
-            # False: want LOW truth_score AND weak signal (good cancellation)
+            # False: want anti-aligned vectors (destructive interference)
             cancellation_quality = 1.0 / (1.0 + signal_strength)
-            score += (1.0 - truth_score) * (1.0 + cancellation_quality)
+            anti_alignment = max(0.0, -cos_ei)  # reward negative cosine
+            score += (1.0 - truth_score) * (1.0 + cancellation_quality) + anti_alignment * 1.0
         else:
-            # True: inhibitory embedder should NOT cancel true statements
-            # Mild bonus for letting true statements through
-            score += truth_score * 0.3
+            # True: I should be aligned with E (constructive interference)
+            alignment = max(0.0, cos_ei)  # reward positive cosine
+            score += truth_score * 0.5 + alignment * 0.5
 
     raw = score / len(oracle)
     return max(0.001, raw - _complexity_penalty(genome, complexity_weight))
@@ -257,7 +271,7 @@ def fitness_interference(
         mean_false = np.mean(false_strengths)
         if mean_true > mean_false:
             separation = (mean_true - mean_false) / (mean_true + mean_false + 1e-8)
-            score += separation * len(oracle)
+            score += separation * len(oracle) * 2.0  # doubled separation reward
 
     raw = score / len(oracle)
     return max(0.001, raw - _complexity_penalty(genome, complexity_weight))
