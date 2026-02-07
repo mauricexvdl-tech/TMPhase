@@ -38,12 +38,14 @@ class OracleItem:
 
     statement: str
     is_true: bool
-    encoded: np.ndarray | None = None
+    _encoded: np.ndarray | None = None
+    _encoded_dim: int = 0
 
-    def encode(self, dim: int = 32) -> np.ndarray:
-        if self.encoded is None:
-            self.encoded = encode_statement(self.statement, dim)
-        return self.encoded
+    def encode(self, dim: int = 64) -> np.ndarray:
+        if self._encoded is None or self._encoded_dim != dim:
+            self._encoded = encode_statement(self.statement, dim)
+            self._encoded_dim = dim
+        return self._encoded
 
 
 class OracleDataset:
@@ -107,6 +109,40 @@ class OracleDataset:
         return ds
 
 
+def fitness_warmup(
+    genome: Genome,
+    boundary_genome: Genome,
+    oracle: OracleDataset,
+    input_dim: int = 48,
+    is_boundary: bool = False,
+    complexity_weight: float = 0.001,
+) -> float:
+    """Warm-up fitness: single-path (E only → Boundary), no I at all.
+
+    Used during the warm-up phase so E and Boundary can learn basic
+    classification before adversarial pressure from I.
+    If is_boundary=True, the genome is the boundary; otherwise it's E.
+    """
+    if is_boundary:
+        net_e = FeedForwardNetwork(boundary_genome)  # boundary_genome is actually the E genome
+        net_b = FeedForwardNetwork(genome)
+    else:
+        net_e = FeedForwardNetwork(genome)
+        net_b = FeedForwardNetwork(boundary_genome)
+
+    score = 0.0
+    for item in oracle.items:
+        encoded = item.encode(input_dim)
+        pos_e = net_e.activate(encoded)
+        truth_score = net_b.activate(pos_e)[0]
+        if item.is_true:
+            score += truth_score
+        else:
+            score += 1.0 - truth_score
+    raw = score / len(oracle)
+    return max(0.001, raw - _complexity_penalty(genome, complexity_weight))
+
+
 def _cosine_similarity(a: np.ndarray, b: np.ndarray) -> float:
     """Cosine similarity between two vectors, returns 0 if either is zero."""
     norm_a = np.linalg.norm(a)
@@ -122,7 +158,7 @@ def fitness_embedder_excitatory(
     interference_genome: Genome | None,
     boundary_genome: Genome,
     oracle: OracleDataset,
-    input_dim: int = 32,
+    input_dim: int = 64,
     use_learned_interference: bool = False,
     complexity_weight: float = 0.001,
 ) -> float:
@@ -175,7 +211,7 @@ def fitness_embedder_inhibitory(
     interference_genome: Genome | None,
     boundary_genome: Genome,
     oracle: OracleDataset,
-    input_dim: int = 32,
+    input_dim: int = 64,
     use_learned_interference: bool = False,
     complexity_weight: float = 0.001,
 ) -> float:
@@ -228,7 +264,7 @@ def fitness_interference(
     embedder_i_genome: Genome,
     boundary_genome: Genome,
     oracle: OracleDataset,
-    input_dim: int = 32,
+    input_dim: int = 64,
     complexity_weight: float = 0.001,
 ) -> float:
     """Fitness function for the Interference network.
@@ -283,13 +319,14 @@ def fitness_boundary(
     embedder_i_genome: Genome,
     interference_genome: Genome | None,
     oracle: OracleDataset,
-    input_dim: int = 32,
+    input_dim: int = 64,
     use_learned_interference: bool = False,
     complexity_weight: float = 0.001,
 ) -> float:
     """Fitness function for the Boundary network.
 
     Rewarded for correctly classifying residual positions as true/false.
+    Uses linear reward + bonus for confident CORRECT predictions.
     """
     net_e = FeedForwardNetwork(embedder_e_genome)
     net_i = FeedForwardNetwork(embedder_i_genome)
@@ -313,8 +350,13 @@ def fitness_boundary(
 
         if item.is_true:
             score += truth_score
+            # Bonus only for confident CORRECT predictions
+            if truth_score > 0.6:
+                score += (truth_score - 0.6) * 0.5
         else:
             score += 1.0 - truth_score
+            if truth_score < 0.4:
+                score += (0.4 - truth_score) * 0.5
 
     raw = score / len(oracle)
     return max(0.001, raw - _complexity_penalty(genome, complexity_weight))

@@ -30,6 +30,7 @@ from .fitness import (
     fitness_embedder_inhibitory,
     fitness_interference,
     fitness_boundary,
+    fitness_warmup,
 )
 
 
@@ -37,7 +38,7 @@ from .fitness import (
 class SystemConfig:
     """Configuration for the full Phase Cancellation system."""
 
-    input_dim: int = 32
+    input_dim: int = 48
     position_dim: int = 16
     population_size: int = 100
     use_learned_interference: bool = True
@@ -45,6 +46,11 @@ class SystemConfig:
     survival_rate: float = 0.2
     crossover_rate: float = 0.75
     compatibility_threshold: float = 3.0
+    # Structural mutation rates (moderate increase for topology diversity)
+    add_node_rate: float = 0.05
+    add_conn_rate: float = 0.08
+    # Warm-up: train E+Boundary alone for this many generations first
+    warmup_generations: int = 10
 
 
 @dataclass
@@ -164,9 +170,19 @@ class PhaseCancellationSystem:
             return population.best_genome
         return random.choice(population.genomes)
 
+    def _is_warmup(self) -> bool:
+        """Check if we're in the warm-up phase (single-path, no adversarial I)."""
+        return self.generation < self.config.warmup_generations
+
     def evolve_generation(self) -> EvolutionStats:
-        """Run one generation of co-evolution across all networks."""
+        """Run one generation of co-evolution across all networks.
+
+        During warm-up (first N generations), only E and Boundary evolve.
+        I stays frozen, giving the system time to learn basic classification
+        before adversarial pressure kicks in.
+        """
         cfg = self.config
+        warmup = self._is_warmup()
 
         # Get current best opponents for fitness evaluation
         best_e = self._get_best_or_random(self.embedder_e.population)
@@ -179,16 +195,27 @@ class PhaseCancellationSystem:
         )
 
         # --- Evaluate Embedder_E ---
-        def eval_e(genome: Genome) -> float:
-            return fitness_embedder_excitatory(
-                genome,
-                embedder_i_genome=best_i,
-                interference_genome=best_interference,
-                boundary_genome=best_boundary,
-                oracle=self.oracle,
-                input_dim=cfg.input_dim,
-                use_learned_interference=cfg.use_learned_interference,
-            )
+        if warmup:
+            # During warm-up: pure E → Boundary, no I involvement
+            def eval_e(genome: Genome) -> float:
+                return fitness_warmup(
+                    genome,
+                    boundary_genome=best_boundary,
+                    oracle=self.oracle,
+                    input_dim=cfg.input_dim,
+                    is_boundary=False,
+                )
+        else:
+            def eval_e(genome: Genome) -> float:
+                return fitness_embedder_excitatory(
+                    genome,
+                    embedder_i_genome=best_i,
+                    interference_genome=best_interference,
+                    boundary_genome=best_boundary,
+                    oracle=self.oracle,
+                    input_dim=cfg.input_dim,
+                    use_learned_interference=cfg.use_learned_interference,
+                )
 
         self.embedder_e.population.evaluate(eval_e)
         self.embedder_e.population.evolve(
@@ -201,30 +228,31 @@ class PhaseCancellationSystem:
         # Update best_e after evolution
         best_e = self._get_best_or_random(self.embedder_e.population)
 
-        # --- Evaluate Embedder_I ---
-        def eval_i(genome: Genome) -> float:
-            return fitness_embedder_inhibitory(
-                genome,
-                embedder_e_genome=best_e,
-                interference_genome=best_interference,
-                boundary_genome=best_boundary,
-                oracle=self.oracle,
-                input_dim=cfg.input_dim,
-                use_learned_interference=cfg.use_learned_interference,
+        # --- Evaluate Embedder_I (skip during warm-up) ---
+        if not warmup:
+            def eval_i(genome: Genome) -> float:
+                return fitness_embedder_inhibitory(
+                    genome,
+                    embedder_e_genome=best_e,
+                    interference_genome=best_interference,
+                    boundary_genome=best_boundary,
+                    oracle=self.oracle,
+                    input_dim=cfg.input_dim,
+                    use_learned_interference=cfg.use_learned_interference,
+                )
+
+            self.embedder_i.population.evaluate(eval_i)
+            self.embedder_i.population.evolve(
+                elitism=cfg.elitism,
+                survival_rate=cfg.survival_rate,
+                crossover_rate=cfg.crossover_rate,
+                compatibility_threshold=cfg.compatibility_threshold,
             )
 
-        self.embedder_i.population.evaluate(eval_i)
-        self.embedder_i.population.evolve(
-            elitism=cfg.elitism,
-            survival_rate=cfg.survival_rate,
-            crossover_rate=cfg.crossover_rate,
-            compatibility_threshold=cfg.compatibility_threshold,
-        )
+            best_i = self._get_best_or_random(self.embedder_i.population)
 
-        best_i = self._get_best_or_random(self.embedder_i.population)
-
-        # --- Evaluate Interference (if learned) ---
-        if self.interference.population is not None:
+        # --- Evaluate Interference (skip during warm-up) ---
+        if not warmup and self.interference.population is not None:
             def eval_interference(genome: Genome) -> float:
                 return fitness_interference(
                     genome,
@@ -245,16 +273,26 @@ class PhaseCancellationSystem:
             best_interference = self._get_best_or_random(self.interference.population)
 
         # --- Evaluate Boundary ---
-        def eval_boundary(genome: Genome) -> float:
-            return fitness_boundary(
-                genome,
-                embedder_e_genome=best_e,
-                embedder_i_genome=best_i,
-                interference_genome=best_interference,
-                oracle=self.oracle,
-                input_dim=cfg.input_dim,
-                use_learned_interference=cfg.use_learned_interference,
-            )
+        if warmup:
+            def eval_boundary(genome: Genome) -> float:
+                return fitness_warmup(
+                    genome,
+                    boundary_genome=best_e,  # pass E genome as the 'boundary_genome' param
+                    oracle=self.oracle,
+                    input_dim=cfg.input_dim,
+                    is_boundary=True,
+                )
+        else:
+            def eval_boundary(genome: Genome) -> float:
+                return fitness_boundary(
+                    genome,
+                    embedder_e_genome=best_e,
+                    embedder_i_genome=best_i,
+                    interference_genome=best_interference,
+                    oracle=self.oracle,
+                    input_dim=cfg.input_dim,
+                    use_learned_interference=cfg.use_learned_interference,
+                )
 
         self.boundary.population.evaluate(eval_boundary)
         self.boundary.population.evolve(
@@ -273,6 +311,7 @@ class PhaseCancellationSystem:
 
     def _compute_stats(self) -> EvolutionStats:
         """Compute statistics for the current generation."""
+        warmup = self._is_warmup()
         best_e = self._get_best_or_random(self.embedder_e.population)
         best_i = self._get_best_or_random(self.embedder_i.population)
         best_boundary = self._get_best_or_random(self.boundary.population)
@@ -294,13 +333,17 @@ class PhaseCancellationSystem:
         for item in self.oracle.items:
             encoded = item.encode(self.config.input_dim)
             pos_e = net_e.activate(encoded)
-            pos_i = net_i.activate(encoded)
 
-            if net_interference is not None and self.config.use_learned_interference:
-                combined = np.concatenate([pos_e, pos_i])
-                residual = net_interference.activate(combined)
+            if warmup:
+                # During warm-up, only use E (no I, no interference)
+                residual = pos_e
             else:
-                residual = pos_e + pos_i
+                pos_i = net_i.activate(encoded)
+                if net_interference is not None and self.config.use_learned_interference:
+                    combined = np.concatenate([pos_e, pos_i])
+                    residual = net_interference.activate(combined)
+                else:
+                    residual = pos_e + pos_i
 
             truth_score = net_boundary.activate(residual)[0]
             signal_strength = np.linalg.norm(residual)
@@ -393,10 +436,11 @@ class PhaseCancellationSystem:
     ) -> list[EvolutionStats]:
         """Train the system for a number of generations."""
         for gen in range(generations):
+            phase = "WARM" if self._is_warmup() else "COEV"
             stats = self.evolve_generation()
             if verbose:
                 print(
-                    f"Gen {stats.generation:4d} | "
+                    f"[{phase}] Gen {stats.generation:4d} | "
                     f"Acc: {stats.accuracy:.2%} | "
                     f"True signal: {stats.mean_true_signal:.3f} | "
                     f"False signal: {stats.mean_false_signal:.3f} | "

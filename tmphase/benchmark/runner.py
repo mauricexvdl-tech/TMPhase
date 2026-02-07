@@ -28,11 +28,11 @@ from ..evolution.coevolution import PhaseCancellationSystem, SystemConfig
 
 @dataclass
 class BenchmarkConfig:
-    input_dim: int = 32
+    input_dim: int = 48
     position_dim: int = 16
-    population_size: int = 50
-    generations: int = 40
-    n_seeds: int = 5
+    population_size: int = 80
+    generations: int = 60
+    n_seeds: int = 3
     train_ratio: float = 0.7
 
 
@@ -72,8 +72,8 @@ def run_benchmark(config: BenchmarkConfig | None = None) -> None:
     }
 
     print("=" * 72)
-    print("TMPhase Benchmark Suite v2")
-    print(f"Encoding: combined (BOW+n-gram) | Adversarial fitness: v3")
+    print("TMPhase Benchmark Suite v4")
+    print(f"Encoding: combined (BOW+n-gram) | dim={config.input_dim} | warm-up + confidence fitness")
     print(f"Config: pop={config.population_size}, gen={config.generations}, "
           f"seeds={config.n_seeds}, train_ratio={config.train_ratio}")
     print("=" * 72)
