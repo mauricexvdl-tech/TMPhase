@@ -16,11 +16,11 @@ def encode_symbol(symbol: str, dim: int = 32) -> np.ndarray:
     """
     h = hashlib.sha256(symbol.encode("utf-8")).digest()
     # Use enough bytes to fill the requested dimension
-    while len(h) < dim * 4:
+    while len(h) < dim:
         h += hashlib.sha256(h).digest()
-    raw = np.frombuffer(h[: dim * 4], dtype=np.float32).copy()
-    # Normalize to [-1, 1]
-    raw = raw / (np.abs(raw).max() + 1e-8)
+    # Convert bytes to uint8 then scale to [-1, 1] (no NaN/Inf possible)
+    raw = np.frombuffer(h[:dim], dtype=np.uint8).astype(np.float32)
+    raw = (raw / 127.5) - 1.0  # Maps [0, 255] -> [-1.0, ~1.0]
     return raw[:dim]
 
 

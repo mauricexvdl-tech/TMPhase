@@ -155,7 +155,11 @@ class PhaseCancellationSystem:
         self.stats_history: list[EvolutionStats] = []
 
     def _get_best_or_random(self, population: Population) -> Genome:
-        """Get the best genome from a population, or a random one if none."""
+        """Get the best genome from the current generation, or a random one."""
+        # Use the current generation's best (not all-time best) for co-evolution,
+        # since fitness landscapes shift as opponents evolve.
+        if population.genomes:
+            return max(population.genomes, key=lambda g: g.fitness)
         if population.best_genome is not None:
             return population.best_genome
         return random.choice(population.genomes)
