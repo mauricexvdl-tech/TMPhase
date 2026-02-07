@@ -21,6 +21,17 @@ from ..neat.network import FeedForwardNetwork
 from ..utils.encoding import encode_statement
 
 
+def _complexity_penalty(genome: Genome, weight: float = 0.001) -> float:
+    """Penalize genome complexity to prevent overfitting.
+
+    Counts enabled connections and hidden nodes — simpler networks
+    that achieve the same fitness are preferred (Occam's razor).
+    """
+    n_connections = sum(1 for c in genome.connections if c.enabled)
+    n_hidden = len(genome.hidden_nodes)
+    return weight * (n_connections + 2.0 * n_hidden)
+
+
 @dataclass
 class OracleItem:
     """A single item in the oracle dataset."""
@@ -104,6 +115,7 @@ def fitness_embedder_excitatory(
     oracle: OracleDataset,
     input_dim: int = 32,
     use_learned_interference: bool = False,
+    complexity_weight: float = 0.001,
 ) -> float:
     """Fitness function for the Excitatory Embedder.
 
@@ -142,7 +154,8 @@ def fitness_embedder_excitatory(
             # But mild bonus if false items happen to score low
             score += (1.0 - truth_score) * 0.3
 
-    return max(0.001, score / len(oracle))
+    raw = score / len(oracle)
+    return max(0.001, raw - _complexity_penalty(genome, complexity_weight))
 
 
 def fitness_embedder_inhibitory(
@@ -153,6 +166,7 @@ def fitness_embedder_inhibitory(
     oracle: OracleDataset,
     input_dim: int = 32,
     use_learned_interference: bool = False,
+    complexity_weight: float = 0.001,
 ) -> float:
     """Fitness function for the Inhibitory Embedder.
 
@@ -190,7 +204,8 @@ def fitness_embedder_inhibitory(
             # Mild bonus for letting true statements through
             score += truth_score * 0.3
 
-    return max(0.001, score / len(oracle))
+    raw = score / len(oracle)
+    return max(0.001, raw - _complexity_penalty(genome, complexity_weight))
 
 
 def fitness_interference(
@@ -200,6 +215,7 @@ def fitness_interference(
     boundary_genome: Genome,
     oracle: OracleDataset,
     input_dim: int = 32,
+    complexity_weight: float = 0.001,
 ) -> float:
     """Fitness function for the Interference network.
 
@@ -243,7 +259,8 @@ def fitness_interference(
             separation = (mean_true - mean_false) / (mean_true + mean_false + 1e-8)
             score += separation * len(oracle)
 
-    return max(0.001, score / len(oracle))
+    raw = score / len(oracle)
+    return max(0.001, raw - _complexity_penalty(genome, complexity_weight))
 
 
 def fitness_boundary(
@@ -254,6 +271,7 @@ def fitness_boundary(
     oracle: OracleDataset,
     input_dim: int = 32,
     use_learned_interference: bool = False,
+    complexity_weight: float = 0.001,
 ) -> float:
     """Fitness function for the Boundary network.
 
@@ -284,4 +302,5 @@ def fitness_boundary(
         else:
             score += 1.0 - truth_score
 
-    return max(0.001, score / len(oracle))
+    raw = score / len(oracle)
+    return max(0.001, raw - _complexity_penalty(genome, complexity_weight))

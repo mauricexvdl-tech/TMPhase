@@ -11,9 +11,8 @@ from dataclasses import dataclass
 import numpy as np
 
 from .datasets import (
-    create_easy_dataset,
+    create_large_dataset,
     create_medium_dataset,
-    create_hard_dataset,
     create_split_dataset,
 )
 from .baselines import (
@@ -32,19 +31,18 @@ class BenchmarkConfig:
     input_dim: int = 32
     position_dim: int = 16
     population_size: int = 50
-    generations: int = 30
+    generations: int = 40
     n_seeds: int = 5
     train_ratio: float = 0.7
 
 
 def run_benchmark(config: BenchmarkConfig | None = None) -> None:
-    """Run the full benchmark suite."""
+    """Run the focused benchmark: MEDIUM + LARGE datasets only."""
     config = config or BenchmarkConfig()
 
     datasets = {
-        "EASY": create_easy_dataset(),
         "MEDIUM": create_medium_dataset(),
-        "HARD": create_hard_dataset(),
+        "LARGE": create_large_dataset(),
     }
 
     approaches = {
@@ -74,10 +72,13 @@ def run_benchmark(config: BenchmarkConfig | None = None) -> None:
     }
 
     print("=" * 72)
-    print("TMPhase Benchmark Suite")
+    print("TMPhase Benchmark Suite v2")
+    print(f"Encoding: n-gram (semantic) | Regularization: ON")
     print(f"Config: pop={config.population_size}, gen={config.generations}, "
           f"seeds={config.n_seeds}, train_ratio={config.train_ratio}")
     print("=" * 72)
+
+    all_results: dict[str, dict[str, list[BaselineResult]]] = {}
 
     for ds_name, dataset in datasets.items():
         print(f"\n{'─' * 72}")
@@ -85,7 +86,6 @@ def run_benchmark(config: BenchmarkConfig | None = None) -> None:
               f"{len(dataset.true_items)} true, {len(dataset.false_items)} false)")
         print(f"{'─' * 72}")
 
-        # Collect results per approach
         results: dict[str, list[BaselineResult]] = {name: [] for name in approaches}
 
         for seed in range(config.n_seeds):
@@ -110,23 +110,27 @@ def run_benchmark(config: BenchmarkConfig | None = None) -> None:
         # Summary table
         print(f"\n  {'─' * 60}")
         print(f"  Summary ({ds_name}):")
-        print(f"  {'Approach':20s} | {'Train':>14s} | {'Test':>14s}")
-        print(f"  {'─' * 20}-+-{'─' * 14}-+-{'─' * 14}")
+        print(f"  {'Approach':20s} | {'Train':>14s} | {'Test':>14s} | {'Overfit':>8s}")
+        print(f"  {'─' * 20}-+-{'─' * 14}-+-{'─' * 14}-+-{'─' * 8}")
 
         for app_name, res_list in results.items():
             train_accs = [r.train_accuracy for r in res_list]
             test_accs = [r.test_accuracy for r in res_list]
+            overfit = np.mean(train_accs) - np.mean(test_accs)
             print(f"  {app_name:20s} | "
                   f"{np.mean(train_accs):.1%} +/- {np.std(train_accs):.1%} | "
-                  f"{np.mean(test_accs):.1%} +/- {np.std(test_accs):.1%}")
+                  f"{np.mean(test_accs):.1%} +/- {np.std(test_accs):.1%} | "
+                  f"{overfit:+.1%}")
 
-    # Cancellation analysis on medium dataset
+        all_results[ds_name] = results
+
+    # Cancellation analysis on LARGE dataset
     print(f"\n{'=' * 72}")
-    print("Cancellation Analysis (MEDIUM dataset, full data, last seed)")
+    print("Cancellation Analysis (LARGE dataset, full training data)")
     print(f"{'=' * 72}")
 
-    medium = create_medium_dataset()
-    for item in medium.items:
+    large = create_large_dataset()
+    for item in large.items:
         item.encode(config.input_dim)
 
     sys_config = SystemConfig(
@@ -135,10 +139,10 @@ def run_benchmark(config: BenchmarkConfig | None = None) -> None:
         population_size=config.population_size,
         use_learned_interference=True,
     )
-    system = PhaseCancellationSystem(config=sys_config, oracle=medium)
+    system = PhaseCancellationSystem(config=sys_config, oracle=large)
     system.train(generations=config.generations, verbose=False)
 
-    metrics = analyze_cancellation(system, medium)
+    metrics = analyze_cancellation(system, large)
     print(format_analysis(metrics))
 
 
