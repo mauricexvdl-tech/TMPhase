@@ -25,7 +25,7 @@ class FeedForwardNetwork:
         self._node_map: dict[int, NodeGene] = {n.id: n for n in genome.nodes}
         self._incoming: dict[int, list[tuple[int, float]]] = {n.id: [] for n in genome.nodes}
         for conn in genome.connections:
-            if conn.enabled:
+            if conn.enabled and conn.out_node in self._incoming and conn.in_node in self._node_map:
                 self._incoming[conn.out_node].append((conn.in_node, conn.weight))
 
         # Topological sort (Kahn's algorithm)

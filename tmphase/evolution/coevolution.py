@@ -30,7 +30,8 @@ from .fitness import (
     fitness_embedder_inhibitory,
     fitness_interference,
     fitness_boundary,
-    fitness_warmup,
+    fitness_warmup_embedder,
+    fitness_warmup_boundary,
 )
 
 
@@ -51,6 +52,8 @@ class SystemConfig:
     add_conn_rate: float = 0.08
     # Warm-up: train E+Boundary alone for this many generations first
     warmup_generations: int = 10
+    # Transition: freeze E, introduce I, retrain Boundary on new distribution
+    transition_generations: int = 5
 
 
 @dataclass
@@ -170,19 +173,37 @@ class PhaseCancellationSystem:
             return population.best_genome
         return random.choice(population.genomes)
 
+    def _phase(self) -> str:
+        """Return the current training phase.
+
+        - 'warmup': Only E + Boundary, no I (learn basic classification)
+        - 'transition': Introduce I + Interference, only Boundary + I evolve
+          (adapt to new signal distribution without disrupting E)
+        - 'coevolution': Full adversarial co-evolution of all networks
+        """
+        cfg = self.config
+        if self.generation < cfg.warmup_generations:
+            return "warmup"
+        elif self.generation < cfg.warmup_generations + cfg.transition_generations:
+            return "transition"
+        else:
+            return "coevolution"
+
     def _is_warmup(self) -> bool:
         """Check if we're in the warm-up phase (single-path, no adversarial I)."""
-        return self.generation < self.config.warmup_generations
+        return self._phase() == "warmup"
 
     def evolve_generation(self) -> EvolutionStats:
         """Run one generation of co-evolution across all networks.
 
-        During warm-up (first N generations), only E and Boundary evolve.
-        I stays frozen, giving the system time to learn basic classification
-        before adversarial pressure kicks in.
+        Three phases:
+        - Warm-up: Only E + Boundary evolve (E-only signals, no I)
+        - Transition: E frozen, I + Interference + Boundary evolve
+          (adapts to the new dual-path signal distribution)
+        - Co-evolution: Full adversarial co-evolution of all networks
         """
         cfg = self.config
-        warmup = self._is_warmup()
+        phase = self._phase()
 
         # Get current best opponents for fitness evaluation
         best_e = self._get_best_or_random(self.embedder_e.population)
@@ -194,18 +215,13 @@ class PhaseCancellationSystem:
             else None
         )
 
-        # --- Evaluate Embedder_E ---
-        if warmup:
-            # During warm-up: pure E → Boundary, no I involvement
+        # --- Evaluate Embedder_E (skip during transition to preserve learned E) ---
+        if phase == "warmup":
             def eval_e(genome: Genome) -> float:
-                return fitness_warmup(
-                    genome,
-                    boundary_genome=best_boundary,
-                    oracle=self.oracle,
-                    input_dim=cfg.input_dim,
-                    is_boundary=False,
+                return fitness_warmup_embedder(
+                    genome, best_boundary, self.oracle, cfg.input_dim,
                 )
-        else:
+        elif phase == "coevolution":
             def eval_e(genome: Genome) -> float:
                 return fitness_embedder_excitatory(
                     genome,
@@ -216,20 +232,22 @@ class PhaseCancellationSystem:
                     input_dim=cfg.input_dim,
                     use_learned_interference=cfg.use_learned_interference,
                 )
+        else:
+            eval_e = None  # transition: E is frozen
 
-        self.embedder_e.population.evaluate(eval_e)
-        self.embedder_e.population.evolve(
-            elitism=cfg.elitism,
-            survival_rate=cfg.survival_rate,
-            crossover_rate=cfg.crossover_rate,
-            compatibility_threshold=cfg.compatibility_threshold,
-        )
+        if eval_e is not None:
+            self.embedder_e.population.evaluate(eval_e)
+            self.embedder_e.population.evolve(
+                elitism=cfg.elitism,
+                survival_rate=cfg.survival_rate,
+                crossover_rate=cfg.crossover_rate,
+                compatibility_threshold=cfg.compatibility_threshold,
+            )
 
-        # Update best_e after evolution
         best_e = self._get_best_or_random(self.embedder_e.population)
 
         # --- Evaluate Embedder_I (skip during warm-up) ---
-        if not warmup:
+        if phase != "warmup":
             def eval_i(genome: Genome) -> float:
                 return fitness_embedder_inhibitory(
                     genome,
@@ -252,7 +270,7 @@ class PhaseCancellationSystem:
             best_i = self._get_best_or_random(self.embedder_i.population)
 
         # --- Evaluate Interference (skip during warm-up) ---
-        if not warmup and self.interference.population is not None:
+        if phase != "warmup" and self.interference.population is not None:
             def eval_interference(genome: Genome) -> float:
                 return fitness_interference(
                     genome,
@@ -273,16 +291,13 @@ class PhaseCancellationSystem:
             best_interference = self._get_best_or_random(self.interference.population)
 
         # --- Evaluate Boundary ---
-        if warmup:
+        if phase == "warmup":
             def eval_boundary(genome: Genome) -> float:
-                return fitness_warmup(
-                    genome,
-                    boundary_genome=best_e,  # pass E genome as the 'boundary_genome' param
-                    oracle=self.oracle,
-                    input_dim=cfg.input_dim,
-                    is_boundary=True,
+                return fitness_warmup_boundary(
+                    genome, best_e, self.oracle, cfg.input_dim,
                 )
         else:
+            # transition + coevolution: boundary sees full E+I residuals
             def eval_boundary(genome: Genome) -> float:
                 return fitness_boundary(
                     genome,
@@ -311,7 +326,7 @@ class PhaseCancellationSystem:
 
     def _compute_stats(self) -> EvolutionStats:
         """Compute statistics for the current generation."""
-        warmup = self._is_warmup()
+        warmup = self._phase() == "warmup"
         best_e = self._get_best_or_random(self.embedder_e.population)
         best_i = self._get_best_or_random(self.embedder_i.population)
         best_boundary = self._get_best_or_random(self.boundary.population)
@@ -436,7 +451,8 @@ class PhaseCancellationSystem:
     ) -> list[EvolutionStats]:
         """Train the system for a number of generations."""
         for gen in range(generations):
-            phase = "WARM" if self._is_warmup() else "COEV"
+            phase_name = {"warmup": "WARM", "transition": "TRAN", "coevolution": "COEV"}
+            phase = phase_name.get(self._phase(), "COEV")
             stats = self.evolve_generation()
             if verbose:
                 print(

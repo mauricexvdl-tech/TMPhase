@@ -109,26 +109,20 @@ class OracleDataset:
         return ds
 
 
-def fitness_warmup(
-    genome: Genome,
+def fitness_warmup_embedder(
+    embedder_genome: Genome,
     boundary_genome: Genome,
     oracle: OracleDataset,
     input_dim: int = 48,
-    is_boundary: bool = False,
     complexity_weight: float = 0.001,
 ) -> float:
-    """Warm-up fitness: single-path (E only → Boundary), no I at all.
+    """Warm-up fitness for Embedder E: single-path (E → Boundary), no I.
 
-    Used during the warm-up phase so E and Boundary can learn basic
-    classification before adversarial pressure from I.
-    If is_boundary=True, the genome is the boundary; otherwise it's E.
+    Used during the warm-up phase so E can learn to produce embeddings
+    that the boundary can classify, before adversarial pressure from I.
     """
-    if is_boundary:
-        net_e = FeedForwardNetwork(boundary_genome)  # boundary_genome is actually the E genome
-        net_b = FeedForwardNetwork(genome)
-    else:
-        net_e = FeedForwardNetwork(genome)
-        net_b = FeedForwardNetwork(boundary_genome)
+    net_e = FeedForwardNetwork(embedder_genome)
+    net_b = FeedForwardNetwork(boundary_genome)
 
     score = 0.0
     for item in oracle.items:
@@ -140,7 +134,35 @@ def fitness_warmup(
         else:
             score += 1.0 - truth_score
     raw = score / len(oracle)
-    return max(0.001, raw - _complexity_penalty(genome, complexity_weight))
+    return max(0.001, raw - _complexity_penalty(embedder_genome, complexity_weight))
+
+
+def fitness_warmup_boundary(
+    boundary_genome: Genome,
+    embedder_genome: Genome,
+    oracle: OracleDataset,
+    input_dim: int = 48,
+    complexity_weight: float = 0.001,
+) -> float:
+    """Warm-up fitness for Boundary: reads E-only signals and classifies.
+
+    Used during the warm-up phase so Boundary can learn to read E's
+    output before the dual-path signal distribution changes.
+    """
+    net_e = FeedForwardNetwork(embedder_genome)
+    net_b = FeedForwardNetwork(boundary_genome)
+
+    score = 0.0
+    for item in oracle.items:
+        encoded = item.encode(input_dim)
+        pos_e = net_e.activate(encoded)
+        truth_score = net_b.activate(pos_e)[0]
+        if item.is_true:
+            score += truth_score
+        else:
+            score += 1.0 - truth_score
+    raw = score / len(oracle)
+    return max(0.001, raw - _complexity_penalty(boundary_genome, complexity_weight))
 
 
 def _cosine_similarity(a: np.ndarray, b: np.ndarray) -> float:

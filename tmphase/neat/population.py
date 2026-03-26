@@ -73,20 +73,25 @@ class Population:
         new_genomes: list[Genome] = []
 
         # Elitism: keep best from each species
+        total_elites = 0
         for sp in self.species:
             sp.members.sort(key=lambda g: g.fitness, reverse=True)
-            for g in sp.members[:elitism]:
+            n_elite = min(elitism, len(sp.members))
+            for g in sp.members[:n_elite]:
                 if len(new_genomes) < self.size:
                     new_genomes.append(g.copy())
+                    total_elites += 1
 
-        # Produce offspring
+        remaining_slots = self.size - total_elites
+
+        # Produce offspring — allocate from remaining slots (not full size)
         for sp in self.species:
             if not sp.members:
                 continue
             sp_adj = sum(g.fitness / len(sp.members) for g in sp.members)
             n_offspring = max(
                 1,
-                int(round(sp_adj / max(total_adj_fitness, 1e-8) * self.size)) - elitism,
+                int(round(sp_adj / max(total_adj_fitness, 1e-8) * remaining_slots)),
             )
 
             # Select parents from top fraction
